@@ -1,11 +1,18 @@
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
+#[macro_use]
+extern crate arrayref;
+
+mod scream;
+
+use byteorder::{ByteOrder, LittleEndian};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::RingBuffer;
-use std::net::{Ipv4Addr, UdpSocket};
+use scream::{ScreamHeader, ScreamHeaderArray};
+use std::io::{Error, ErrorKind};
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::time::Duration;
 
 const SCREAM_PACKET_MAX_SIZE: usize = 1157;
-const SCREAM_PACKET_HEADER_SIZE: usize = 5;
-const BUFFER_SIZE: usize = 1024;
+const NETWORK_BUFFER_SIZE: usize = 2048;
 const MAX_CHANNELS: usize = 10;
 
 type ScreamPacket = [u8; SCREAM_PACKET_MAX_SIZE];
@@ -16,109 +23,133 @@ struct AudioPlayer {
     stream: cpal::Stream,
 }
 
-fn main() -> std::io::Result<()> {
-    let inaddr_any = "0.0.0.0"
-        .parse::<Ipv4Addr>()
-        .expect("Could not parse inaddrAny");
+const ADDR_ANY: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
+const SCREAM_MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 77);
+const SCREAM_MULTICAST_PORT: u16 = 4010;
 
-    let scream_addr = "239.255.77.77"
-        .parse::<Ipv4Addr>()
-        .expect("Could not parse address for scream");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let device = select_cpal_device(Some("Speakers (HyperX Cloud Flight Wireless Headset)"))?;
 
-    let socket = UdpSocket::bind("0.0.0.0:4010").expect("Could not bind socket");
-
-    socket
-        .join_multicast_v4(&scream_addr, &inaddr_any)
-        .expect("Could not join multicast");
+    let socket = UdpSocket::bind(SocketAddrV4::new(ADDR_ANY, SCREAM_MULTICAST_PORT))?;
+    socket.join_multicast_v4(&SCREAM_MULTICAST_ADDR, &ADDR_ANY)?;
+    socket.set_read_timeout(Some(Duration::new(1, 0)))?;
 
     let mut audio_player_buffer: Box<Option<AudioPlayer>> = Box::new(None);
     let mut buf: ScreamPacket = [0u8; SCREAM_PACKET_MAX_SIZE];
+    let mut previous_header: ScreamHeaderArray = [0u8; 5];
 
     loop {
-        let (size, _addr) = socket
-            .recv_from(&mut buf)
-            .expect("Error while waiting data from socket");
+        let res = socket.recv_from(&mut buf);
 
-        // println!("Buf {:?}", buf);
-
-        if (&audio_player_buffer).is_none() {
-            audio_player_buffer = Box::new(Some(create_audio_player(&buf)))
-        }
-
-        let sample_size = buf[1] as usize;
-        let sample_size_bytes = sample_size / 8;
-
-        let channels = 2; // TODO.
-        let samples =
-            (&buf[SCREAM_PACKET_HEADER_SIZE..size]).chunks_exact(sample_size_bytes * channels);
-
-        for sample in samples {
-            let mut new_buf: BufferSample = [0i16; MAX_CHANNELS];
-
-            for (i, channel_sample) in sample.chunks(sample_size_bytes).enumerate() {
-                new_buf[i] = match sample_size {
-                    16 => LittleEndian::read_i16(channel_sample) as i16,
-                    24 => LittleEndian::read_i24(channel_sample) as i16, // TODO.
-                    32 => LittleEndian::read_i32(channel_sample) as i16, // TODO.
-                    _ => 0,
-                };
+        match &res {
+            Err(e) => {
+                if e.kind() == ErrorKind::TimedOut {
+                    if (&audio_player_buffer).is_some() {
+                        println!("No output, stopping audio.");
+                        audio_player_buffer = Box::new(None);
+                    }
+                    continue;
+                }
             }
 
-            let current_audio_player = audio_player_buffer
-                .as_mut()
-                .as_mut()
-                .expect("No current audio player");
+            _ => (),
+        }
 
-            match current_audio_player.buffer.push(new_buf) {
-                Ok(_) => {} // all ok
-                Err(_item) => println!("Buffer full!"),
+        let (size, _addr) = res?;
+        let header: &ScreamHeaderArray = array_ref![buf, 0, 5];
+        let samples = &buf[5..size];
+
+        if (&audio_player_buffer).is_none() || previous_header.as_slice() != header.as_slice() {
+            previous_header = *header;
+            audio_player_buffer = Box::new(Some(create_audio_player(&device, header)?))
+        }
+
+        let current_audio_player = audio_player_buffer.as_mut().as_mut().unwrap();
+
+        let packet_sample_bytes =
+            samples.chunks_exact(header.sample_bytes() * header.channels() as usize);
+
+        for sample_bytes in packet_sample_bytes {
+            let buffer_sample = convert_to_sample(header, sample_bytes);
+
+            match current_audio_player.buffer.push(buffer_sample) {
+                Err(_err) => println!("Buffer overflow"),
+                _ => (),
             }
         }
     }
 }
 
-fn parse_sampling_rate(rate: u8) -> u32 {
-    let multiplier = (rate & 0b01111111) as u32;
+pub fn convert_to_sample(header: &impl ScreamHeader, sample: &[u8]) -> [i16; 10] {
+    let mut new_buf = [0i16; 10];
 
-    return match rate & 0b10000000 == 0 {
-        true => 48000 * multiplier,
-        false => 44100 * multiplier,
-    };
+    for (i, channel_sample) in sample.chunks(header.sample_bytes()).enumerate() {
+        new_buf[i] = match header.sample_bits() {
+            16 => LittleEndian::read_i16(channel_sample) as i16,
+            24 => LittleEndian::read_i24(channel_sample) as i16, // TODO.
+            32 => LittleEndian::read_i32(channel_sample) as i16, // TODO.
+            _ => 0,
+        };
+    }
+
+    new_buf
 }
 
-fn create_audio_player(initial_packet: &ScreamPacket) -> AudioPlayer {
-    let buf = RingBuffer::<BufferSample>::new(BUFFER_SIZE);
-    let (prod, cons) = buf.split();
-
-    let host = cpal::default_host();
-    let mut devices = host.devices().expect("Output devices cannot be listed");
-
-    let device = devices
-        .find(|d| {
-            d.name().expect("Device has no name?")
-                == "Speakers (HyperX Cloud Flight Wireless Headset)"
+fn output_devices(host: cpal::Host) -> Result<Vec<cpal::Device>, cpal::DevicesError> {
+    let devices = host
+        .devices()?
+        .filter(|d| {
+            // only devices that support configurations.
+            d.supported_output_configs()
+                .map(|mut x| x.next() != None)
+                .unwrap_or(false)
         })
-        .expect("Cannot load default output device");
+        .collect();
+
+    Ok(devices)
+}
+
+fn select_cpal_device(name: Option<&str>) -> Result<cpal::Device, Box<dyn std::error::Error>> {
+    let host = cpal::default_host();
+
+    let device = match name {
+        Some(n) => output_devices(host)?
+            .into_iter()
+            .find(|d| d.name().map(|name| name == n).unwrap_or(false)),
+        None => host.default_output_device(),
+    };
+
+    device.ok_or(Box::new(Error::new(
+        ErrorKind::NotFound,
+        "Could not find audio device",
+    )))
+}
+
+fn create_audio_player(
+    device: &cpal::Device,
+    header: &ScreamHeaderArray,
+) -> Result<AudioPlayer, Box<dyn std::error::Error>> {
+    let buf = RingBuffer::<BufferSample>::new(1024 * 10);
+    let (prod, cons) = buf.split();
 
     let stream_config = cpal::StreamConfig {
         buffer_size: cpal::BufferSize::Default,
-        channels: 2, // TODO: hardcoded for now.
-        sample_rate: cpal::SampleRate(parse_sampling_rate(initial_packet[0])),
+        channels: header.channels(),
+        sample_rate: cpal::SampleRate(header.sample_rate()),
     };
 
-    let stream = match device.default_output_config().unwrap().sample_format() {
+    let stream = match device.default_output_config()?.sample_format() {
         cpal::SampleFormat::F32 => build_output_stream::<f32>(&device, &stream_config, cons),
         cpal::SampleFormat::I16 => build_output_stream::<i16>(&device, &stream_config, cons),
         cpal::SampleFormat::U16 => build_output_stream::<u16>(&device, &stream_config, cons),
-    }
-    .expect("Could not create stream");
+    }?;
 
-    stream.play().expect("Could not play stream");
+    stream.play()?;
 
-    return AudioPlayer {
+    Ok(AudioPlayer {
         stream: stream,
         buffer: prod,
-    };
+    })
 }
 
 fn build_output_stream<T>(
@@ -131,12 +162,18 @@ where
 {
     let channels = config.channels as usize;
 
-    return device.build_output_stream(
+    device.build_output_stream(
         &config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
-            if cons.len() < (output.len() / channels) {
-                println!("Buffer underrun...");
+            let necessary_buffer_size = std::cmp::max(NETWORK_BUFFER_SIZE, output.len() / channels);
+
+            if cons.len() < necessary_buffer_size {
                 return;
+            }
+
+            if cons.len() > necessary_buffer_size * 5 {
+                println!("Buffer getting overrun, pop some out...");
+                cons.discard(necessary_buffer_size * 4);
             }
 
             for frame in output.chunks_mut(channels.into()) {
@@ -154,5 +191,5 @@ where
             }
         },
         |_err| println!("Some weird error huh!"),
-    );
+    )
 }

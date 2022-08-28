@@ -1,24 +1,26 @@
-trait ScreamHeader {
+pub type ScreamHeaderArray = [u8; 5];
+
+pub trait ScreamHeader {
     fn sample_rate(&self) -> u32;
-    fn sample_size(&self) -> usize;
+    fn sample_bits(&self) -> u8;
     fn channels(&self) -> u16;
-    fn sample_size_bytes(&self) -> usize;
+    fn sample_bytes(&self) -> usize {
+        return self.sample_bits() as usize / 8;
+    }
 }
 
-impl ScreamHeader for [u8; 5] {
+impl ScreamHeader for ScreamHeaderArray {
     fn sample_rate(&self) -> u32 {
-        let multiplier = (rate & 0b01111111) as u32;
-
-        return match rate & 0b10000000 == 0 {
+        let rate_byte = self[0];
+        let multiplier = (rate_byte & 0b01111111) as u32;
+        return match rate_byte & 0b10000000 == 0 {
             true => 48000 * multiplier,
             false => 44100 * multiplier,
         };
     }
-
-    fn sample_size(&self) -> usize {
+    fn sample_bits(&self) -> u8 {
         return self[1];
     }
-
     fn channels(&self) -> u16 {
         return 2; // TODO
     }
