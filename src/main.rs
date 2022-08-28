@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 const SCREAM_PACKET_MAX_SIZE: usize = 1157;
-const NETWORK_BUFFER_SIZE: usize = 2048;
+const NETWORK_BUFFER_SIZE: usize = 1024;
 const MAX_CHANNELS: usize = 10;
 
 type ScreamPacket = [u8; SCREAM_PACKET_MAX_SIZE];
@@ -99,7 +99,7 @@ fn output_devices(host: cpal::Host) -> Result<Vec<cpal::Device>, cpal::DevicesEr
     let devices = host
         .devices()?
         .filter(|d| {
-            // only devices that support configurations.
+            // only devices that support output configurations.
             d.supported_output_configs()
                 .map(|mut x| x.next() != None)
                 .unwrap_or(false)
@@ -152,6 +152,8 @@ fn create_audio_player(
     })
 }
 
+const LOG_ITERATIONS: i32 = 100;
+
 fn build_output_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -161,11 +163,23 @@ where
     T: cpal::Sample,
 {
     let channels = config.channels as usize;
+    let mut iteration = 0i32;
 
     device.build_output_stream(
         &config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
-            let necessary_buffer_size = std::cmp::max(NETWORK_BUFFER_SIZE, output.len() / channels);
+            iteration += 1;
+
+            let samples_requested = output.len() / channels;
+            let necessary_buffer_size = std::cmp::max(NETWORK_BUFFER_SIZE, samples_requested);
+
+            if iteration % LOG_ITERATIONS == 0 {
+                println!(
+                    "Samples in ring buffer: {}, necessary size: {}",
+                    cons.len(),
+                    necessary_buffer_size
+                )
+            }
 
             if cons.len() < necessary_buffer_size {
                 return;
