@@ -6,7 +6,7 @@ mod scream;
 
 use byteorder::{ByteOrder, LittleEndian};
 use cpal::traits::{DeviceTrait, HostTrait};
-use output_stream::{create_audio_player, AudioPlayer};
+use output_stream::{create_audio_player, AudioPlayer, BufferSample};
 use scream::{ScreamHeader, ScreamHeaderArray, ScreamPacket, SCREAM_PACKET_MAX_SIZE};
 use std::io::{Error, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     socket.join_multicast_v4(&SCREAM_MULTICAST_ADDR, &ADDR_ANY)?;
     socket.set_read_timeout(Some(Duration::new(1, 0)))?;
 
-    let mut audio_player_buffer: Box<Option<AudioPlayer>> = Box::new(None);
+    let mut audio_player: Box<Option<AudioPlayer>> = Box::new(None);
     let mut buf: ScreamPacket = [0u8; SCREAM_PACKET_MAX_SIZE];
     let mut previous_header: ScreamHeaderArray = [0u8; 5];
 
@@ -34,9 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match &res {
             Err(e) => {
                 if e.kind() == ErrorKind::TimedOut {
-                    if (&audio_player_buffer).is_some() {
+                    if (&audio_player).is_some() {
                         println!("No output, stopping audio.");
-                        audio_player_buffer = Box::new(None);
+                        audio_player = Box::new(None);
                     }
                     continue;
                 }
@@ -49,13 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let header: &ScreamHeaderArray = array_ref![buf, 0, 5];
         let samples = &buf[5..size];
 
-        if (&audio_player_buffer).is_none() || previous_header.as_slice() != header.as_slice() {
+        if (&audio_player).is_none() || previous_header.as_slice() != header.as_slice() {
             println!("Output received, starting audio");
             previous_header = *header;
-            audio_player_buffer = Box::new(Some(create_audio_player(&device, header)?));
+            audio_player = Box::new(Some(create_audio_player(&device, header)?));
         }
 
-        let current_audio_player = audio_player_buffer.as_mut().as_mut().unwrap();
+        let current_audio_player = audio_player.as_mut().as_mut().unwrap();
 
         let packet_sample_bytes =
             samples.chunks_exact(header.sample_bytes() * header.channels() as usize);
@@ -79,7 +79,7 @@ fn convert_to_f32_sample<const FROM_SIGNED_BIT_INT: isize>(i: f64) -> f32 {
     }
 }
 
-fn convert_to_sample(header: &impl ScreamHeader, sample: &[u8]) -> [f32; 10] {
+fn convert_to_sample(header: &impl ScreamHeader, sample: &[u8]) -> BufferSample {
     let mut new_buf = [0.0f32; 10];
 
     for (i, channel_sample) in sample.chunks(header.sample_bytes()).enumerate() {
