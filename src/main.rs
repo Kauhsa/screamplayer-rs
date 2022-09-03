@@ -7,14 +7,10 @@ mod scream;
 use byteorder::{ByteOrder, LittleEndian};
 use cpal::traits::{DeviceTrait, HostTrait};
 use output_stream::{create_audio_player, AudioPlayer};
-use scream::{ScreamHeader, ScreamHeaderArray};
+use scream::{ScreamHeader, ScreamHeaderArray, ScreamPacket, SCREAM_PACKET_MAX_SIZE};
 use std::io::{Error, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
-
-const SCREAM_PACKET_MAX_SIZE: usize = 1157;
-
-type ScreamPacket = [u8; SCREAM_PACKET_MAX_SIZE];
 
 const ADDR_ANY: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 const SCREAM_MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 77);
@@ -83,7 +79,7 @@ fn convert_to_f32_sample<const FROM_SIGNED_BIT_INT: isize>(i: f64) -> f32 {
     }
 }
 
-pub fn convert_to_sample(header: &impl ScreamHeader, sample: &[u8]) -> [f32; 10] {
+fn convert_to_sample(header: &impl ScreamHeader, sample: &[u8]) -> [f32; 10] {
     let mut new_buf = [0.0f32; 10];
 
     for (i, channel_sample) in sample.chunks(header.sample_bytes()).enumerate() {

@@ -1,3 +1,7 @@
+pub const SCREAM_PACKET_MAX_SIZE: usize = 1157;
+
+pub type ScreamPacket = [u8; SCREAM_PACKET_MAX_SIZE];
+
 pub type ScreamHeaderArray = [u8; 5];
 
 pub trait ScreamHeader {

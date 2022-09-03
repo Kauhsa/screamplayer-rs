@@ -4,6 +4,21 @@ use ringbuf::RingBuffer;
 
 const MAX_CHANNELS: usize = 10;
 const NETWORK_BUFFER_SIZE: usize = 1024;
+const RING_BUFFER_SIZE: usize = NETWORK_BUFFER_SIZE * 10;
+const REVERT_TO_CHUGGING_ALONG_FACTOR: f32 = 1.1;
+const START_PLAYING_SLOWER_FACTOR: f32 = 0.5;
+const START_PLAYING_FASTER_FACTOR: f32 = 2.0;
+
+#[derive(Debug, Clone)]
+struct NoSamplesInBufferError;
+
+#[derive(PartialEq, Debug, Clone, Copy)]
+enum OutputMode {
+    Stopped,
+    ChuggingAlong,
+    PlaySlower,
+    PlayFaster,
+}
 
 pub type BufferSample = [f32; MAX_CHANNELS];
 
@@ -17,11 +32,11 @@ pub fn create_audio_player(
     device: &cpal::Device,
     header: &ScreamHeaderArray,
 ) -> Result<AudioPlayer, Box<dyn std::error::Error>> {
-    let buf = RingBuffer::<BufferSample>::new(1024 * 10);
+    let buf = RingBuffer::<BufferSample>::new(RING_BUFFER_SIZE);
     let (prod, cons) = buf.split();
 
     let stream_config = cpal::StreamConfig {
-        buffer_size: cpal::BufferSize::Fixed(32),
+        buffer_size: cpal::BufferSize::Default,
         channels: header.channels(),
         sample_rate: cpal::SampleRate(header.sample_rate()),
     };
@@ -38,18 +53,6 @@ pub fn create_audio_player(
         stream: stream,
         buffer: prod,
     })
-}
-
-const REVERT_TO_CHUGGING_ALONG_FACTOR: f32 = 1.1;
-const START_PLAYING_SLOWER_FACTOR: f32 = 0.5;
-const START_PLAYING_FASTER_FACTOR: f32 = 2.0;
-
-#[derive(PartialEq, Debug, Clone, Copy)]
-enum OutputMode {
-    Stopped,
-    ChuggingAlong,
-    PlaySlower,
-    PlayFaster,
 }
 
 fn get_output_mode(
@@ -73,9 +76,9 @@ fn get_output_mode(
         return OutputMode::PlayFaster;
     }
 
-    if ((samples_requested as f32 / REVERT_TO_CHUGGING_ALONG_FACTOR) as usize) < samples_available
-        && samples_available < (samples_requested as f32 * REVERT_TO_CHUGGING_ALONG_FACTOR) as usize
-    {
+    let back_to_chug_low = (samples_requested as f32 / REVERT_TO_CHUGGING_ALONG_FACTOR) as usize;
+    let back_to_chug_high = (samples_requested as f32 * REVERT_TO_CHUGGING_ALONG_FACTOR) as usize;
+    if back_to_chug_low < samples_available && samples_available < back_to_chug_high {
         return OutputMode::ChuggingAlong;
     }
 
@@ -85,23 +88,23 @@ fn get_output_mode(
 fn get_sample(
     output_mode: OutputMode,
     cons: &mut ringbuf::Consumer<BufferSample>,
-    last_sample: &[f32; 10],
+    last_sample: &BufferSample,
     iteration: i32,
-) -> [f32; 10] {
+) -> Result<[f32; 10], NoSamplesInBufferError> {
     match output_mode {
-        OutputMode::Stopped => *last_sample,
-        OutputMode::ChuggingAlong => cons.pop().expect("Ring buffer was unexpectedly empty"),
+        OutputMode::Stopped => Ok(*last_sample),
+        OutputMode::ChuggingAlong => cons.pop().ok_or(NoSamplesInBufferError),
         OutputMode::PlayFaster => {
             // pop an extra one
-            cons.pop().expect("Ring buffer was unexpectedly empty");
-            cons.pop().expect("Ring buffer was unexpectedly empty")
+            cons.pop().ok_or(NoSamplesInBufferError)?;
+            cons.pop().ok_or(NoSamplesInBufferError)
         }
         OutputMode::PlaySlower => {
-            // half of the time, return the last sample instead
+            // half of the time, return the previous sample instead
             if iteration % 2 == 0 {
-                *last_sample
+                Ok(*last_sample)
             } else {
-                cons.pop().expect("Ring buffer was unexpectedly empty")
+                cons.pop().ok_or(NoSamplesInBufferError)
             }
         }
     }
@@ -118,7 +121,7 @@ where
     let channels = config.channels as usize;
     let mut iteration: i32 = 0;
     let mut output_mode = OutputMode::Stopped;
-    let mut last_sample: [f32; 10] = [0.0; 10];
+    let mut last_sample: BufferSample = [0.0; MAX_CHANNELS];
 
     device.build_output_stream(
         &config,
@@ -143,9 +146,11 @@ where
 
                 output_mode = new_output_mode;
 
-                let sample = get_sample(output_mode, &mut cons, &last_sample, iteration);
+                let sample = get_sample(output_mode, &mut cons, &last_sample, iteration)
+                    .unwrap_or(last_sample);
+
                 for (channel, channel_sample) in frame.iter_mut().enumerate() {
-                    *channel_sample = cpal::Sample::from::<f32>(&sample[channel]);
+                    *channel_sample = cpal::Sample::from(&sample[channel]);
                 }
 
                 last_sample = sample;
