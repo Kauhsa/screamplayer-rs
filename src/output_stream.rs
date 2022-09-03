@@ -9,6 +9,7 @@ pub type BufferSample = [f32; MAX_CHANNELS];
 
 pub struct AudioPlayer {
     pub buffer: ringbuf::Producer<BufferSample>,
+    #[allow(dead_code)]
     stream: cpal::Stream,
 }
 
