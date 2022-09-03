@@ -75,11 +75,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn convert_to_f32<const BITS: isize>(i: f64) -> f32 {
+fn convert_to_f32_sample<const FROM_SIGNED_BIT_INT: isize>(i: f64) -> f32 {
     if i < 0.0 {
-        (i / (2.0f64.powf(BITS as f64 - 1.0))) as f32
+        (i / (2.0f64.powf(FROM_SIGNED_BIT_INT as f64 - 1.0))) as f32
     } else {
-        (i / (2.0f64.powf(BITS as f64 - 1.0) - 1.0)) as f32
+        (i / (2.0f64.powf(FROM_SIGNED_BIT_INT as f64 - 1.0) - 1.0)) as f32
     }
 }
 
@@ -88,9 +88,9 @@ pub fn convert_to_sample(header: &impl ScreamHeader, sample: &[u8]) -> [f32; 10]
 
     for (i, channel_sample) in sample.chunks(header.sample_bytes()).enumerate() {
         new_buf[i] = match header.sample_bits() {
-            16 => convert_to_f32::<16>(LittleEndian::read_i16(channel_sample).into()),
-            24 => convert_to_f32::<24>(LittleEndian::read_i24(channel_sample).into()),
-            32 => convert_to_f32::<32>(LittleEndian::read_i32(channel_sample).into()),
+            16 => convert_to_f32_sample::<16>(LittleEndian::read_i16(channel_sample).into()),
+            24 => convert_to_f32_sample::<24>(LittleEndian::read_i24(channel_sample).into()),
+            32 => convert_to_f32_sample::<32>(LittleEndian::read_i32(channel_sample).into()),
             _ => 0.0,
         };
     }
