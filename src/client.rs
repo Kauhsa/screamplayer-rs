@@ -13,8 +13,7 @@ const SCREAM_MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 77);
 const SCREAM_MULTICAST_PORT: u16 = 4010;
 
 pub fn start_client(args: &Args) -> anyhow::Result<()> {
-    //let device = select_cpal_device(Some("Speakers (HyperX Cloud Flight Wireless Headset)"))?;
-    let device = select_cpal_device(args.output_device.as_ref())?;
+    let device = select_cpal_device(args.output_device.as_ref().map(|s| s.as_str()))?;
 
     let socket = UdpSocket::bind(SocketAddrV4::new(ADDR_ANY, SCREAM_MULTICAST_PORT))?;
     socket.join_multicast_v4(&SCREAM_MULTICAST_ADDR, &ADDR_ANY)?;
@@ -104,7 +103,7 @@ fn output_devices(host: cpal::Host) -> Result<Vec<cpal::Device>, cpal::DevicesEr
     Ok(devices)
 }
 
-fn select_cpal_device(name: Option<&String>) -> anyhow::Result<cpal::Device> {
+fn select_cpal_device(name: Option<&str>) -> anyhow::Result<cpal::Device> {
     let host = cpal::default_host();
 
     let device = match name {
