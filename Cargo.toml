@@ -10,3 +10,5 @@ ringbuf = "0.2.8"
 cpal = "0.14.0"
 byteorder = "1.4.3"
 arrayref = "0.3.6"
+clap = { version = "3.2.20", features = ["derive"] }
+anyhow = "1.0.63"

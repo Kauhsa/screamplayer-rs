@@ -1,13 +1,9 @@
 use crate::scream::{ScreamHeader, ScreamHeaderArray};
+use crate::Args;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use ringbuf::RingBuffer;
 
 const MAX_CHANNELS: usize = 10;
-const NETWORK_BUFFER_SIZE: usize = 1024;
-const RING_BUFFER_SIZE: usize = NETWORK_BUFFER_SIZE * 10;
-const REVERT_TO_CHUGGING_ALONG_FACTOR: f32 = 1.1;
-const START_PLAYING_SLOWER_FACTOR: f32 = 0.5;
-const START_PLAYING_FASTER_FACTOR: f32 = 2.0;
 
 #[derive(Debug, Clone)]
 struct NoSamplesInBufferError;
@@ -31,8 +27,9 @@ pub struct AudioPlayer {
 pub fn create_audio_player(
     device: &cpal::Device,
     header: &ScreamHeaderArray,
-) -> Result<AudioPlayer, Box<dyn std::error::Error>> {
-    let buf = RingBuffer::<BufferSample>::new(RING_BUFFER_SIZE);
+    args: &Args,
+) -> anyhow::Result<AudioPlayer> {
+    let buf = RingBuffer::<BufferSample>::new(args.samples_buffered * 10);
     let (prod, cons) = buf.split();
 
     let stream_config = cpal::StreamConfig {
@@ -42,9 +39,15 @@ pub fn create_audio_player(
     };
 
     let stream = match device.default_output_config()?.sample_format() {
-        cpal::SampleFormat::F32 => build_output_stream::<f32>(&device, &stream_config, cons),
-        cpal::SampleFormat::I16 => build_output_stream::<i16>(&device, &stream_config, cons),
-        cpal::SampleFormat::U16 => build_output_stream::<u16>(&device, &stream_config, cons),
+        cpal::SampleFormat::F32 => {
+            build_output_stream::<f32>(&device, &stream_config, cons, args.clone())
+        }
+        cpal::SampleFormat::I16 => {
+            build_output_stream::<i16>(&device, &stream_config, cons, args.clone())
+        }
+        cpal::SampleFormat::U16 => {
+            build_output_stream::<u16>(&device, &stream_config, cons, args.clone())
+        }
     }?;
 
     stream.play()?;
@@ -59,6 +62,7 @@ fn get_output_mode(
     current_output_mode: OutputMode,
     samples_requested: usize,
     samples_available: usize,
+    args: &Args,
 ) -> OutputMode {
     if samples_available == 0 {
         return OutputMode::Stopped;
@@ -68,16 +72,16 @@ fn get_output_mode(
         return OutputMode::ChuggingAlong;
     }
 
-    if samples_available < (samples_requested as f32 * START_PLAYING_SLOWER_FACTOR) as usize {
+    if samples_available < (samples_requested as f32 * args.slower_playback_threshold) as usize {
         return OutputMode::PlaySlower;
     }
 
-    if samples_available > (samples_requested as f32 * START_PLAYING_FASTER_FACTOR) as usize {
+    if samples_available > (samples_requested as f32 * args.faster_playback_threshold) as usize {
         return OutputMode::PlayFaster;
     }
 
-    let back_to_chug_low = (samples_requested as f32 / REVERT_TO_CHUGGING_ALONG_FACTOR) as usize;
-    let back_to_chug_high = (samples_requested as f32 * REVERT_TO_CHUGGING_ALONG_FACTOR) as usize;
+    let back_to_chug_low = (samples_requested as f32 / args.normal_playback_threshold) as usize;
+    let back_to_chug_high = (samples_requested as f32 * args.normal_playback_threshold) as usize;
     if back_to_chug_low < samples_available && samples_available < back_to_chug_high {
         return OutputMode::ChuggingAlong;
     }
@@ -110,10 +114,11 @@ fn get_sample(
     }
 }
 
-fn build_output_stream<T>(
+fn build_output_stream<'a, T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut cons: ringbuf::Consumer<BufferSample>,
+    args: Args,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: cpal::Sample,
@@ -127,13 +132,13 @@ where
         &config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             let samples_requested = output.len() / channels;
-            let necessary_buffer_size = std::cmp::max(NETWORK_BUFFER_SIZE, samples_requested);
+            let necessary_buffer_size = std::cmp::max(args.samples_buffered, samples_requested);
 
             for frame in output.chunks_mut(channels.into()) {
                 iteration += 1;
 
                 let new_output_mode =
-                    get_output_mode(output_mode, necessary_buffer_size, cons.len());
+                    get_output_mode(output_mode, necessary_buffer_size, cons.len(), &args);
 
                 if output_mode != new_output_mode {
                     println!(
