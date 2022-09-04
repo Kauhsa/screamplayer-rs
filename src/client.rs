@@ -12,57 +12,84 @@ const ADDR_ANY: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 const SCREAM_MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 77, 77);
 const SCREAM_MULTICAST_PORT: u16 = 4010;
 
-pub fn start_client(args: &Args) -> anyhow::Result<()> {
-    let device = select_cpal_device(args.output_device.as_ref().map(|s| s.as_str()))?;
+enum ScreamReaderState {
+    Waiting,
+    Playing(AudioPlayer),
+}
 
-    let socket = UdpSocket::bind(SocketAddrV4::new(ADDR_ANY, SCREAM_MULTICAST_PORT))?;
-    socket.join_multicast_v4(&SCREAM_MULTICAST_ADDR, &ADDR_ANY)?;
-    socket.set_read_timeout(Some(Duration::new(1, 0)))?;
+pub struct ScreamReader {
+    args: Args,
+    device: cpal::Device,
+    state: ScreamReaderState,
+    socket: UdpSocket,
+    buf: ScreamPacket,
+    previous_header: ScreamHeaderArray,
+}
 
-    let mut audio_player: Box<Option<AudioPlayer>> = Box::new(None);
-    let mut buf: ScreamPacket = [0u8; SCREAM_PACKET_MAX_SIZE];
-    let mut previous_header: ScreamHeaderArray = [0u8; 5];
+impl ScreamReader {
+    pub fn new(args: Args) -> anyhow::Result<ScreamReader> {
+        let socket = UdpSocket::bind(SocketAddrV4::new(ADDR_ANY, SCREAM_MULTICAST_PORT))?;
+        socket.join_multicast_v4(&SCREAM_MULTICAST_ADDR, &ADDR_ANY)?;
+        socket.set_read_timeout(Some(Duration::new(1, 0)))?;
 
-    loop {
-        let res = socket.recv_from(&mut buf);
+        let device_name = args.output_device.as_ref().map(|s| s.as_str());
 
-        match &res {
-            Err(e) => {
-                if e.kind() == ErrorKind::TimedOut {
-                    if (&audio_player).is_some() {
-                        println!("No output, stopping audio.");
-                        audio_player = Box::new(None);
-                    }
-                    continue;
+        Ok(ScreamReader {
+            device: select_cpal_device(device_name)?,
+            args: args,
+            state: ScreamReaderState::Waiting,
+            socket: socket,
+            buf: [0u8; SCREAM_PACKET_MAX_SIZE],
+            previous_header: [0u8; 5],
+        })
+    }
+
+    pub fn read(&mut self) -> anyhow::Result<()> {
+        let res = self.socket.recv_from(&mut self.buf);
+
+        if let Err(e) = &res {
+            if e.kind() == ErrorKind::TimedOut {
+                if self.is_playing_now() {
+                    println!("No output, stopping audio.");
+                    self.state = ScreamReaderState::Waiting
                 }
-            }
 
-            _ => (),
+                return Ok(());
+            }
         }
 
         let (size, _addr) = res?;
-        let header: &ScreamHeaderArray = array_ref![buf, 0, 5];
-        let samples = &buf[5..size];
+        let header: &ScreamHeaderArray = array_ref![self.buf, 0, 5];
+        let samples = &self.buf[5..size];
 
-        if (&audio_player).is_none() || previous_header.as_slice() != header.as_slice() {
+        let is_header_same_than_previous = self.previous_header.as_slice() == header.as_slice();
+
+        if !self.is_playing_now() || !is_header_same_than_previous {
             println!("Output received, starting audio");
-            previous_header = *header;
-            audio_player = Box::new(Some(create_audio_player(&device, header, args)?));
+            let audio_player = create_audio_player(&self.device, header, &self.args)?;
+            self.state = ScreamReaderState::Playing(audio_player);
+            self.previous_header = *header;
         }
 
-        let current_audio_player = audio_player.as_mut().as_mut().unwrap();
+        if let ScreamReaderState::Playing(audio_player) = &mut self.state {
+            let packet_sample_bytes =
+                samples.chunks_exact(header.sample_bytes() * header.channels() as usize);
 
-        let packet_sample_bytes =
-            samples.chunks_exact(header.sample_bytes() * header.channels() as usize);
+            for sample_bytes in packet_sample_bytes {
+                let buffer_sample = convert_to_sample(header, sample_bytes);
 
-        for sample_bytes in packet_sample_bytes {
-            let buffer_sample = convert_to_sample(header, sample_bytes);
-
-            match current_audio_player.buffer.push(buffer_sample) {
-                Err(_err) => println!("Buffer overflow"),
-                _ => (),
+                match audio_player.buffer.push(buffer_sample) {
+                    Err(_err) => println!("Buffer overflow"),
+                    _ => (),
+                }
             }
         }
+
+        Ok(())
+    }
+
+    fn is_playing_now(&self) -> bool {
+        matches!(self.state, ScreamReaderState::Playing(_))
     }
 }
 

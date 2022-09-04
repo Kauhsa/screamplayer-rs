@@ -3,6 +3,7 @@ extern crate arrayref;
 
 use anyhow;
 use clap::Parser;
+use client::ScreamReader;
 
 mod client;
 mod output_stream;
@@ -29,6 +30,9 @@ pub struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let mut scream_reader = ScreamReader::new(args)?;
 
-    client::start_client(&args)
+    loop {
+        scream_reader.read()?
+    }
 }

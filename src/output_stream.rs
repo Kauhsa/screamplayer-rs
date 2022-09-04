@@ -114,7 +114,7 @@ fn get_sample(
     }
 }
 
-fn build_output_stream<'a, T>(
+fn build_output_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut cons: ringbuf::Consumer<BufferSample>,
